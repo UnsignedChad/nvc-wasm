@@ -153,8 +153,8 @@ node build/wasm/bin/nvc --std=08 -L build/wasm/lib -a your.vhd -e top -r
 
 This builds on top of:
 
-- An earlier nvc-wasm experiment by Zhukov Georgiy, which mapped out the
-  dependency space and concluded it would need "massive changes." It does
-  — but they're tractable when you start from `--disable-llvm` and don't
-  try to recreate nvc's own autotools in CMake.
+- [Zhukov Georgiy's nvc_wasm](https://github.com/zhugeo/nvc_wasm), which
+  mapped out the dependency space and concluded it would need "massive
+  changes." It does — but they're tractable when you start from
+  `--disable-llvm` and don't try to recreate nvc's own autotools in CMake.
 - The [nvc compiler](https://github.com/nickg/nvc) by Nick Gasson, GPLv3.
