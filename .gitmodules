@@ -1,12 +1,4 @@
 [submodule "3rdparty/nvc"]
 	path = 3rdparty/nvc
 	url = https://github.com/nickg/nvc.git
-[submodule "3rdparty/llvm-project"]
-	path = 3rdparty/llvm-project
-	url = https://github.com/llvm/llvm-project.git
-[submodule "3rdparty/zlib"]
-	path = 3rdparty/zlib
-	url = https://github.com/madler/zlib.git
-[submodule "3rdparty/libxml2"]
-	path = 3rdparty/libxml2
-	url = https://github.com/GNOME/libxml2.git
+	ignore = dirty

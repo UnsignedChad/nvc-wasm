@@ -1,0 +1,270 @@
+diff --git a/src/jit/Makemodule.am b/src/jit/Makemodule.am
+index f6b516842..e6daa78eb 100644
+--- a/src/jit/Makemodule.am
++++ b/src/jit/Makemodule.am
+@@ -14,7 +14,8 @@ lib_libnvc_a_SOURCES += \
+ 	src/jit/jit-pack.c \
+ 	src/jit/jit-layout.h \
+ 	src/jit/jit-layout.c \
+-	src/jit/jit-intrin.c
++	src/jit/jit-intrin.c \
++	src/jit/wasm_symtab.c
+ 
+ if ARCH_X86_64
+ lib_libnvc_a_SOURCES += src/jit/jit-x86.c
+diff --git a/src/jit/jit-code.c b/src/jit/jit-code.c
+index 334ec6444..fd7ae4aa8 100644
+--- a/src/jit/jit-code.c
++++ b/src/jit/jit-code.c
+@@ -516,7 +516,9 @@ void code_blob_finalise(code_blob_t *blob, jit_entry_fn_t *entry)
+       color_printf("$$\n");
+    }
+ 
++#ifndef __wasm__
+    __builtin___clear_cache((char *)span->base, (char *)blob->wptr);
++#endif
+ 
+    thread_wx_mode(WX_EXECUTE);
+ 
+diff --git a/src/jit/jit-ffi.c b/src/jit/jit-ffi.c
+index 17f2c1d45..d1d3f5a01 100644
+--- a/src/jit/jit-ffi.c
++++ b/src/jit/jit-ffi.c
+@@ -145,6 +145,8 @@ static jit_dll_t *ffi_load_exe(void)
+    HMODULE exe_handle = GetModuleHandle(NULL);
+    if (exe_handle == NULL)
+       fatal("failed to get handle to main process");
++#elif defined __EMSCRIPTEN__
++   void *exe_handle = (void *)1;   // sentinel; wasm has no runtime symbol table
+ #else
+    void *exe_handle = dlopen(NULL, RTLD_NOW);
+    if (exe_handle == NULL)
+@@ -185,6 +187,9 @@ jit_dll_t *ffi_load_dll(const char *path)
+    HMODULE handle = LoadLibrary(path);
+    if (handle == NULL)
+       fatal("failed to load %s", path);
++#elif defined __EMSCRIPTEN__
++   fatal("loading shared library %s is not supported in the wasm build", path);
++   void *handle = NULL;
+ #else
+    void *handle = dlopen(path, RTLD_LAZY | RTLD_GLOBAL /* XXXX */);
+    if (handle == NULL)
+@@ -208,6 +213,8 @@ void ffi_unload_dll(jit_dll_t *dll)
+ {
+ #ifdef __MINGW32__
+    FreeLibrary(dll->handle);
++#elif defined __EMSCRIPTEN__
++   // no-op; we never really loaded anything
+ #else
+    dlclose(dll->handle);
+ #endif
+@@ -238,6 +245,10 @@ void *ffi_find_symbol(jit_dll_t *dll, const char *name)
+    else {
+ #ifdef __MINGW32__
+       return (void *)(uintptr_t)GetProcAddress(dll->handle, name);
++#elif defined __EMSCRIPTEN__
++      (void)dll;
++      extern void *nvc_wasm_dlsym(const char *);
++      return nvc_wasm_dlsym(name);
+ #else
+       return dlsym(dll->handle, name);
+ #endif
+diff --git a/src/rt/assert.c b/src/rt/assert.c
+index 8fe78e1f9..3f4785dcd 100644
+--- a/src/rt/assert.c
++++ b/src/rt/assert.c
+@@ -193,7 +193,7 @@ static format_part_t *check_format(const char *str)
+ }
+ 
+ DLLEXPORT
+-void _std_env_set_assert_format_valid(jit_scalar_t *args)
++void _std_env_set_assert_format_valid(jit_scalar_t *args, tlab_t *tlab)
+ {
+    uint8_t level = args[2].integer;
+    const uint8_t *format_ptr = args[3].pointer;
+@@ -214,7 +214,7 @@ void _std_env_set_assert_format_valid(jit_scalar_t *args)
+ }
+ 
+ DLLEXPORT
+-void _std_env_set_assert_format(jit_scalar_t *args)
++void _std_env_set_assert_format(jit_scalar_t *args, tlab_t *tlab)
+ {
+    uint8_t level = args[2].integer;
+    const uint8_t *format_ptr = args[3].pointer;
+diff --git a/src/rt/simpkg.c b/src/rt/simpkg.c
+index feabe77df..3a0826c84 100644
+--- a/src/rt/simpkg.c
++++ b/src/rt/simpkg.c
+@@ -23,13 +23,13 @@
+ #include "rt/rt.h"
+ 
+ DLLEXPORT
+-void _nvc_ieee_warnings(jit_scalar_t *args)
++void _nvc_ieee_warnings(jit_scalar_t *args, tlab_t *tlab)
+ {
+    args[0].integer = opt_get_int(OPT_IEEE_WARNINGS);
+ }
+ 
+ DLLEXPORT
+-void _nvc_current_delta(jit_scalar_t *args)
++void _nvc_current_delta(jit_scalar_t *args, tlab_t *tlab)
+ {
+    rt_model_t *m = get_model_or_null();
+ 
+diff --git a/src/rt/standard.c b/src/rt/standard.c
+index 0ff60710a..bfcdd3a80 100644
+--- a/src/rt/standard.c
++++ b/src/rt/standard.c
+@@ -57,7 +57,7 @@ static void bit_vec_to_string(jit_scalar_t *args, tlab_t *tlab, int log_base)
+ }
+ 
+ DLLEXPORT
+-void _std_standard_now(jit_scalar_t *args)
++void _std_standard_now(jit_scalar_t *args, tlab_t *tlab)
+ {
+    rt_model_t *m = get_model_or_null();
+    args[0].integer = m ? model_now(m, NULL) : 0;
+diff --git a/src/rt/stdenv.c b/src/rt/stdenv.c
+index fd90671df..3833cd2ef 100644
+--- a/src/rt/stdenv.c
++++ b/src/rt/stdenv.c
+@@ -204,7 +204,7 @@ static time_t to_time_t(const time_record_t *tr)
+ }
+ 
+ DLLEXPORT
+-void _std_env_stop(jit_scalar_t *args)
++void _std_env_stop(jit_scalar_t *args, tlab_t *tlab)
+ {
+    const int32_t finish      = args[2].integer;
+    const int32_t have_status = args[3].integer;
+@@ -659,7 +659,7 @@ int64_t _std_env_seconds_to_time(double real)
+ }
+ 
+ DLLEXPORT
+-void _std_env_get_vhdl_assert_count(jit_scalar_t *args)
++void _std_env_get_vhdl_assert_count(jit_scalar_t *args, tlab_t *tlab)
+ {
+    vhdl_severity_t severity_level = args[1].integer;
+    args[0].integer = get_vhdl_assert_count(severity_level);
+@@ -672,7 +672,7 @@ void _std_env_clear_vhdl_assert(void)
+ }
+ 
+ DLLEXPORT
+-void _std_env_set_vhdl_assert_enable(jit_scalar_t *args)
++void _std_env_set_vhdl_assert_enable(jit_scalar_t *args, tlab_t *tlab)
+ {
+    vhdl_severity_t severity_level = args[2].integer;
+    bool enable = !!args[3].integer;
+@@ -681,7 +681,7 @@ void _std_env_set_vhdl_assert_enable(jit_scalar_t *args)
+ }
+ 
+ DLLEXPORT
+-void _std_env_get_vhdl_assert_enable(jit_scalar_t *args)
++void _std_env_get_vhdl_assert_enable(jit_scalar_t *args, tlab_t *tlab)
+ {
+    vhdl_severity_t severity_level = args[1].integer;
+    args[0].integer = get_vhdl_assert_enable(severity_level);
+diff --git a/src/thread.c b/src/thread.c
+index eccc5775d..7f03f6a1c 100644
+--- a/src/thread.c
++++ b/src/thread.c
+@@ -57,7 +57,7 @@
+ #define PARKING_BAYS    64
+ #define SUSPEND_TIMEOUT 1
+ 
+-#if !defined __MINGW32__ && !defined __APPLE__
++#if !defined __MINGW32__ && !defined __APPLE__ && !defined __EMSCRIPTEN__
+ #define POSIX_SUSPEND 1
+ #define SIGSUSPEND    SIGRTMIN
+ #define SIGRESUME     (SIGRTMIN + 1)
+@@ -1363,6 +1363,8 @@ void stop_world(stop_world_fn_t callback, void *arg)
+ #elif defined __SANITIZE_THREAD__
+    // https://github.com/google/sanitizers/issues/1179
+    fatal_trace("stop_world is not supported with tsan");
++#elif defined __EMSCRIPTEN__
++   // wasm: no cross-thread signal-based suspension; rely on cooperative model
+ #else
+    assert(sem_trywait(&stop_sem) == -1 && errno == EAGAIN);
+ 
+@@ -1426,6 +1428,8 @@ void start_world(void)
+       if (kern_result != KERN_SUCCESS)
+          fatal_trace("failed to resume thread %d (%d)", i, kern_result);
+    }
++#elif defined __EMSCRIPTEN__
++   (void)maxthread;
+ #else
+    assert(sem_trywait(&stop_sem) == -1 && errno == EAGAIN);
+ 
+diff --git a/src/util.c b/src/util.c
+index 59f532d7b..c59d84841 100644
+--- a/src/util.c
++++ b/src/util.c
+@@ -1207,7 +1207,7 @@ int64_t ipow(int64_t x, int64_t y)
+    return result;
+ }
+ 
+-#ifndef __SANITIZE_ADDRESS__
++#if !defined __SANITIZE_ADDRESS__ && !defined __EMSCRIPTEN__
+ static long nvc_page_size(void)
+ {
+ #ifdef __MINGW32__
+@@ -1222,7 +1222,7 @@ static long nvc_page_size(void)
+ 
+ void nvc_munmap(void *ptr, size_t length)
+ {
+-#if __SANITIZE_ADDRESS__
++#if __SANITIZE_ADDRESS__ || defined __EMSCRIPTEN__
+    free(ptr);
+ #elif !defined __MINGW32__
+    if (munmap(ptr, length) != 0)
+@@ -1235,7 +1235,7 @@ void nvc_munmap(void *ptr, size_t length)
+ 
+ void *nvc_memalign(size_t align, size_t sz)
+ {
+-#if __SANITIZE_ADDRESS__
++#if __SANITIZE_ADDRESS__ || defined __EMSCRIPTEN__
+    void *ptr;
+    if (posix_memalign(&ptr, align, sz) != 0)
+       fatal_errno("posix_memalign");
+@@ -1286,7 +1286,7 @@ void nvc_memprotect(void *ptr, size_t length, mem_access_t prot)
+    if (length > 0 && !VirtualProtect(ptr, length, map[prot], &old_prot))
+       fatal_errno("VirtualProtect");
+ #else
+-#if __SANITIZE_ADDRESS__
++#if __SANITIZE_ADDRESS__ || defined __EMSCRIPTEN__
+    // LeakSanitizer will not detect leaks in regions mapped read-only
+    if (prot == MEM_RO || prot == MEM_NONE)
+       return;
+diff --git a/src/vhpi/vhpi_user.h b/src/vhpi/vhpi_user.h
+index c03b5fd5c..432395582 100644
+--- a/src/vhpi/vhpi_user.h
++++ b/src/vhpi/vhpi_user.h
+@@ -52,7 +52,7 @@ typedef unsigned __int8 uint8_t;
+ typedef signed __int64 int64_t;
+ typedef signed __int32 int32_t;
+ typedef signed __int8 int8_t;
+-#elif defined(__MINGW32__) || defined(__APPLE__)
++#elif defined(__MINGW32__) || defined(__APPLE__) || defined(__EMSCRIPTEN__)
+ #include <stdint.h>
+ #elif defined(__linux)
+ #include <inttypes.h>
+diff --git a/thirdparty/cpustate.c b/thirdparty/cpustate.c
+index 968bdf92b..3c08aaf16 100644
+--- a/thirdparty/cpustate.c
++++ b/thirdparty/cpustate.c
+@@ -32,7 +32,14 @@
+ #define STATIC_ASSERT(x)
+ #endif
+ 
+-#if defined __unix__ || defined __APPLE__
++#if defined __EMSCRIPTEN__
++
++void fill_cpu_state(struct cpu_state *cpu, ucontext_t *uc)
++{
++   memset(cpu, '\0', sizeof(struct cpu_state));
++}
++
++#elif defined __unix__ || defined __APPLE__
+ 
+ void fill_cpu_state(struct cpu_state *cpu, ucontext_t *uc)
+ {

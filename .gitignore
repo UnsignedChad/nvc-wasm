@@ -1,1 +1,6 @@
 build
+work
+WORK.*
+_NVC_LIB
+_index
+*.fst
