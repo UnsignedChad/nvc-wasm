@@ -218,6 +218,19 @@ index 993696427..272b031c7 100644
  {
     vhdl_severity_t severity_level = args[1].integer;
     args[0].integer = get_vhdl_assert_enable(severity_level);
+diff --git a/src/symbols.txt b/src/symbols.txt
+index 3c0ad3f43..857a9d5ea 100644
+--- a/src/symbols.txt
++++ b/src/symbols.txt
+@@ -10,7 +10,7 @@
+   _std_to_string_real_digits;
+   _std_to_string_real_format;
+   _std_to_string_time;
+-  _pollyfil_to_hstring_bit_vec;
++  _polyfill_to_hstring_bit_vec;
+   _polyfill_to_ostring_bit_vec;
+   _polyfill_to_string_real_format;
+ 
 diff --git a/src/thread.c b/src/thread.c
 index bdbe53456..b994833a4 100644
 --- a/src/thread.c
