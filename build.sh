@@ -46,7 +46,10 @@ PREFIX="$DEPS" "$ROOT/scripts/build_deps.sh"
 # 4. autoreconf + emconfigure.
 echo "[4/5] configuring nvc for wasm32-emscripten"
 cd "$NVC"
-[ -f configure ] || ./autogen.sh
+# Always re-run autogen: upstream's committed Makefile.in can lag the .am
+# files (e.g. the deleted nvc.{08,19} ieee_support targets in 1.21-devel),
+# and the stale rules cause make to fail looking for nonexistent sources.
+./autogen.sh
 mkdir -p "$BUILD"
 cd "$BUILD"
 if [ ! -f Makefile ]; then
