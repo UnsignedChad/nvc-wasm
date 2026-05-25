@@ -56,12 +56,21 @@ if [ ! -f "$PREFIX/lib/libffi.a" ] || [ ! -f "$PREFIX/include/ffi.h" ]; then
    # a tiny stub satisfies the linker.
    cd "libffi-$LIBFFI_VER"
    if [ ! -f include/ffi.h ]; then
+      # libffi configure does a libffi_dependency check that fails on newer
+      # emscripten (renamed JS helpers); tolerate the failure, then verify
+      # the headers we actually need landed in include/.
+      set +e
       emconfigure ./configure \
          --prefix="$PREFIX" \
          --host=wasm32-unknown-emscripten \
          --disable-shared --enable-static \
          --disable-multi-os-directory --disable-builddir \
-         >/dev/null
+         >/dev/null 2>&1
+      set -e
+      if [ ! -f include/ffi.h ] || [ ! -f include/ffitarget.h ]; then
+         echo "error: libffi configure failed to produce ffi.h/ffitarget.h" >&2
+         exit 1
+      fi
    fi
    cp include/ffi.h include/ffitarget.h "$PREFIX/include/"
 

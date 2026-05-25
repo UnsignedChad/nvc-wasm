@@ -1,23 +1,23 @@
 diff --git a/src/jit/Makemodule.am b/src/jit/Makemodule.am
-index f6b516842..e6daa78eb 100644
+index 22e7c6de3..2f41bacbe 100644
 --- a/src/jit/Makemodule.am
 +++ b/src/jit/Makemodule.am
 @@ -14,7 +14,8 @@ lib_libnvc_a_SOURCES += \
- 	src/jit/jit-pack.c \
  	src/jit/jit-layout.h \
  	src/jit/jit-layout.c \
--	src/jit/jit-intrin.c
-+	src/jit/jit-intrin.c \
+ 	src/jit/jit-intrin.c \
+-	src/jit/jit-tramp.c
++	src/jit/jit-tramp.c \
 +	src/jit/wasm_symtab.c
  
  if ARCH_X86_64
  lib_libnvc_a_SOURCES += src/jit/jit-x86.c
 diff --git a/src/jit/jit-code.c b/src/jit/jit-code.c
-index 334ec6444..fd7ae4aa8 100644
+index 43d053b2d..7ff3cc40b 100644
 --- a/src/jit/jit-code.c
 +++ b/src/jit/jit-code.c
-@@ -516,7 +516,9 @@ void code_blob_finalise(code_blob_t *blob, jit_entry_fn_t *entry)
-       color_printf("$$\n");
+@@ -595,7 +595,9 @@ void code_blob_finalise(code_blob_t *blob, jit_entry_fn_t *entry)
+       nvc_printf("$$\n");
     }
  
 +#ifndef __wasm__
@@ -26,11 +26,31 @@ index 334ec6444..fd7ae4aa8 100644
  
     thread_wx_mode(WX_EXECUTE);
  
+@@ -853,9 +855,11 @@ static void *code_emit_trampoline(code_blob_t *blob, void *dest)
+       __IMM64((uintptr_t)dest)
+    };
+ #else
++   (void)blob; (void)dest;
+    should_not_reach_here();
+ #endif
+ 
++#if defined ARCH_X86_64 || defined ARCH_ARM64
+    void *prev = memmem(blob->veneers, blob->wptr - blob->veneers,
+                        veneer, ARRAY_LEN(veneer));
+    if (prev != NULL)
+@@ -867,6 +871,7 @@ static void *code_emit_trampoline(code_blob_t *blob, void *dest)
+       code_blob_emit(blob, veneer, ARRAY_LEN(veneer));
+       return addr;
+    }
++#endif
+ }
+ 
+ #if !defined __MINGW32__ && !defined __APPLE__
 diff --git a/src/jit/jit-ffi.c b/src/jit/jit-ffi.c
-index 17f2c1d45..d1d3f5a01 100644
+index d83c9c8cc..ed7a68c9f 100644
 --- a/src/jit/jit-ffi.c
 +++ b/src/jit/jit-ffi.c
-@@ -145,6 +145,8 @@ static jit_dll_t *ffi_load_exe(void)
+@@ -124,6 +124,8 @@ static jit_dll_t *ffi_load_exe(void)
     HMODULE exe_handle = GetModuleHandle(NULL);
     if (exe_handle == NULL)
        fatal("failed to get handle to main process");
@@ -39,17 +59,17 @@ index 17f2c1d45..d1d3f5a01 100644
  #else
     void *exe_handle = dlopen(NULL, RTLD_NOW);
     if (exe_handle == NULL)
-@@ -185,6 +187,9 @@ jit_dll_t *ffi_load_dll(const char *path)
-    HMODULE handle = LoadLibrary(path);
+@@ -226,6 +228,9 @@ jit_dll_t *ffi_load_dll(const char *path)
+    HMODULE handle = LoadLibrary(abs);
     if (handle == NULL)
-       fatal("failed to load %s", path);
+       fatal_errno("failed to load %s", abs);
 +#elif defined __EMSCRIPTEN__
-+   fatal("loading shared library %s is not supported in the wasm build", path);
++   fatal("loading shared library %s is not supported in the wasm build", abs);
 +   void *handle = NULL;
  #else
-    void *handle = dlopen(path, RTLD_LAZY | RTLD_GLOBAL /* XXXX */);
+    void *handle = dlopen(abs, RTLD_LAZY);
     if (handle == NULL)
-@@ -208,6 +213,8 @@ void ffi_unload_dll(jit_dll_t *dll)
+@@ -249,6 +254,8 @@ void ffi_unload_dll(jit_dll_t *dll)
  {
  #ifdef __MINGW32__
     FreeLibrary(dll->handle);
@@ -58,7 +78,7 @@ index 17f2c1d45..d1d3f5a01 100644
  #else
     dlclose(dll->handle);
  #endif
-@@ -238,6 +245,10 @@ void *ffi_find_symbol(jit_dll_t *dll, const char *name)
+@@ -279,6 +286,10 @@ void *ffi_find_symbol(jit_dll_t *dll, const char *name)
     else {
  #ifdef __MINGW32__
        return (void *)(uintptr_t)GetProcAddress(dll->handle, name);
@@ -69,8 +89,42 @@ index 17f2c1d45..d1d3f5a01 100644
  #else
        return dlsym(dll->handle, name);
  #endif
+diff --git a/src/jit/jit-intrin.c b/src/jit/jit-intrin.c
+index 1cd698359..635c8d367 100644
+--- a/src/jit/jit-intrin.c
++++ b/src/jit/jit-intrin.c
+@@ -133,6 +133,15 @@ static const uint8_t not_table[1][16] = {
+ };
+ #endif
+ 
++// spread_nibble is referenced by the scalar __spread_bits_8 helper below
++// and so must be defined regardless of vector ISA availability.
++static const uint32_t spread_nibble[16] = {
++   0x02020202, 0x03020202, 0x02030202, 0x03030202,
++   0x02020302, 0x03020302, 0x02030302, 0x03030302,
++   0x02020203, 0x03020203, 0x02030203, 0x03030203,
++   0x02020303, 0x03020303, 0x02030303, 0x03030303,
++};
++
+ #if defined HAVE_SSE41 || defined HAVE_NEON
+ 
+ // Compressed lookup tables for vectorised intrinsics.  Note the
+@@ -194,13 +203,6 @@ static const uint8_t lane_iota[16] = {
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
+ };
+ 
+-static const uint32_t spread_nibble[16] = {
+-   0x02020202, 0x03020202, 0x02030202, 0x03030202,
+-   0x02020302, 0x03020302, 0x02030302, 0x03030302,
+-   0x02020203, 0x03020203, 0x02030203, 0x03030203,
+-   0x02020303, 0x03020303, 0x02030303, 0x03030303,
+-};
+-
+ #ifdef HAVE_SSE41
+ __attribute__((aligned(16)))
+ static const uint8_t reverse_lane[16] = {
 diff --git a/src/rt/assert.c b/src/rt/assert.c
-index 8fe78e1f9..3f4785dcd 100644
+index 224682603..4322cc004 100644
 --- a/src/rt/assert.c
 +++ b/src/rt/assert.c
 @@ -193,7 +193,7 @@ static format_part_t *check_format(const char *str)
@@ -92,7 +146,7 @@ index 8fe78e1f9..3f4785dcd 100644
     uint8_t level = args[2].integer;
     const uint8_t *format_ptr = args[3].pointer;
 diff --git a/src/rt/simpkg.c b/src/rt/simpkg.c
-index feabe77df..3a0826c84 100644
+index 8e935276f..b790b6781 100644
 --- a/src/rt/simpkg.c
 +++ b/src/rt/simpkg.c
 @@ -23,13 +23,13 @@
@@ -102,7 +156,7 @@ index feabe77df..3a0826c84 100644
 -void _nvc_ieee_warnings(jit_scalar_t *args)
 +void _nvc_ieee_warnings(jit_scalar_t *args, tlab_t *tlab)
  {
-    args[0].integer = opt_get_int(OPT_IEEE_WARNINGS);
+    args[0].integer = (opt_get_int(OPT_IEEE_WARNINGS) == IEEE_WARNINGS_ON);
  }
  
  DLLEXPORT
@@ -112,10 +166,10 @@ index feabe77df..3a0826c84 100644
     rt_model_t *m = get_model_or_null();
  
 diff --git a/src/rt/standard.c b/src/rt/standard.c
-index 0ff60710a..bfcdd3a80 100644
+index 9ec2561a7..81b8950e3 100644
 --- a/src/rt/standard.c
 +++ b/src/rt/standard.c
-@@ -57,7 +57,7 @@ static void bit_vec_to_string(jit_scalar_t *args, tlab_t *tlab, int log_base)
+@@ -91,7 +91,7 @@ static void to_string_real_format(jit_scalar_t *args, tlab_t *tlab,
  }
  
  DLLEXPORT
@@ -125,10 +179,10 @@ index 0ff60710a..bfcdd3a80 100644
     rt_model_t *m = get_model_or_null();
     args[0].integer = m ? model_now(m, NULL) : 0;
 diff --git a/src/rt/stdenv.c b/src/rt/stdenv.c
-index fd90671df..3833cd2ef 100644
+index 993696427..272b031c7 100644
 --- a/src/rt/stdenv.c
 +++ b/src/rt/stdenv.c
-@@ -204,7 +204,7 @@ static time_t to_time_t(const time_record_t *tr)
+@@ -205,7 +205,7 @@ static time_t to_time_t(const time_record_t *tr)
  }
  
  DLLEXPORT
@@ -137,7 +191,7 @@ index fd90671df..3833cd2ef 100644
  {
     const int32_t finish      = args[2].integer;
     const int32_t have_status = args[3].integer;
-@@ -659,7 +659,7 @@ int64_t _std_env_seconds_to_time(double real)
+@@ -663,7 +663,7 @@ int64_t _std_env_seconds_to_time(double real)
  }
  
  DLLEXPORT
@@ -146,7 +200,7 @@ index fd90671df..3833cd2ef 100644
  {
     vhdl_severity_t severity_level = args[1].integer;
     args[0].integer = get_vhdl_assert_count(severity_level);
-@@ -672,7 +672,7 @@ void _std_env_clear_vhdl_assert(void)
+@@ -676,7 +676,7 @@ void _std_env_clear_vhdl_assert(void)
  }
  
  DLLEXPORT
@@ -155,7 +209,7 @@ index fd90671df..3833cd2ef 100644
  {
     vhdl_severity_t severity_level = args[2].integer;
     bool enable = !!args[3].integer;
-@@ -681,7 +681,7 @@ void _std_env_set_vhdl_assert_enable(jit_scalar_t *args)
+@@ -685,7 +685,7 @@ void _std_env_set_vhdl_assert_enable(jit_scalar_t *args)
  }
  
  DLLEXPORT
@@ -165,19 +219,19 @@ index fd90671df..3833cd2ef 100644
     vhdl_severity_t severity_level = args[1].integer;
     args[0].integer = get_vhdl_assert_enable(severity_level);
 diff --git a/src/thread.c b/src/thread.c
-index eccc5775d..7f03f6a1c 100644
+index bdbe53456..b994833a4 100644
 --- a/src/thread.c
 +++ b/src/thread.c
-@@ -57,7 +57,7 @@
- #define PARKING_BAYS    64
+@@ -58,7 +58,7 @@
  #define SUSPEND_TIMEOUT 1
+ #define THREAD_NAME_LEN 16
  
 -#if !defined __MINGW32__ && !defined __APPLE__
 +#if !defined __MINGW32__ && !defined __APPLE__ && !defined __EMSCRIPTEN__
  #define POSIX_SUSPEND 1
  #define SIGSUSPEND    SIGRTMIN
  #define SIGRESUME     (SIGRTMIN + 1)
-@@ -1363,6 +1363,8 @@ void stop_world(stop_world_fn_t callback, void *arg)
+@@ -1374,6 +1374,8 @@ void stop_world(stop_world_fn_t callback, void *arg)
  #elif defined __SANITIZE_THREAD__
     // https://github.com/google/sanitizers/issues/1179
     fatal_trace("stop_world is not supported with tsan");
@@ -186,7 +240,7 @@ index eccc5775d..7f03f6a1c 100644
  #else
     assert(sem_trywait(&stop_sem) == -1 && errno == EAGAIN);
  
-@@ -1426,6 +1428,8 @@ void start_world(void)
+@@ -1437,6 +1439,8 @@ void start_world(void)
        if (kern_result != KERN_SUCCESS)
           fatal_trace("failed to resume thread %d (%d)", i, kern_result);
     }
@@ -196,47 +250,68 @@ index eccc5775d..7f03f6a1c 100644
     assert(sem_trywait(&stop_sem) == -1 && errno == EAGAIN);
  
 diff --git a/src/util.c b/src/util.c
-index 59f532d7b..c59d84841 100644
+index 229ed836c..bb2278db9 100644
 --- a/src/util.c
 +++ b/src/util.c
-@@ -1207,7 +1207,7 @@ int64_t ipow(int64_t x, int64_t y)
+@@ -1043,7 +1043,7 @@ int64_t ipow(int64_t x, int64_t y)
     return result;
  }
  
--#ifndef __SANITIZE_ADDRESS__
-+#if !defined __SANITIZE_ADDRESS__ && !defined __EMSCRIPTEN__
+-#if !ASAN_ENABLED
++#if !ASAN_ENABLED && !defined __EMSCRIPTEN__
  static long nvc_page_size(void)
  {
  #ifdef __MINGW32__
-@@ -1222,7 +1222,7 @@ static long nvc_page_size(void)
+@@ -1058,7 +1058,7 @@ static long nvc_page_size(void)
  
  void nvc_munmap(void *ptr, size_t length)
  {
--#if __SANITIZE_ADDRESS__
-+#if __SANITIZE_ADDRESS__ || defined __EMSCRIPTEN__
+-#if ASAN_ENABLED
++#if ASAN_ENABLED || defined __EMSCRIPTEN__
     free(ptr);
  #elif !defined __MINGW32__
     if (munmap(ptr, length) != 0)
-@@ -1235,7 +1235,7 @@ void nvc_munmap(void *ptr, size_t length)
+@@ -1071,7 +1071,7 @@ void nvc_munmap(void *ptr, size_t length)
  
  void *nvc_memalign(size_t align, size_t sz)
  {
--#if __SANITIZE_ADDRESS__
-+#if __SANITIZE_ADDRESS__ || defined __EMSCRIPTEN__
+-#if ASAN_ENABLED
++#if ASAN_ENABLED || defined __EMSCRIPTEN__
     void *ptr;
     if (posix_memalign(&ptr, align, sz) != 0)
        fatal_errno("posix_memalign");
-@@ -1286,7 +1286,7 @@ void nvc_memprotect(void *ptr, size_t length, mem_access_t prot)
+@@ -1122,7 +1122,7 @@ void nvc_memprotect(void *ptr, size_t length, mem_access_t prot)
     if (length > 0 && !VirtualProtect(ptr, length, map[prot], &old_prot))
        fatal_errno("VirtualProtect");
  #else
--#if __SANITIZE_ADDRESS__
-+#if __SANITIZE_ADDRESS__ || defined __EMSCRIPTEN__
+-#if ASAN_ENABLED
++#if ASAN_ENABLED || defined __EMSCRIPTEN__
     // LeakSanitizer will not detect leaks in regions mapped read-only
     if (prot == MEM_RO || prot == MEM_NONE)
        return;
+diff --git a/src/util.h b/src/util.h
+index 8502c05af..53d46a9d1 100644
+--- a/src/util.h
++++ b/src/util.h
+@@ -22,6 +22,16 @@
+ #include "config.h"
+ #endif
+ 
++// autoheader silently drops PATH_SEP and DLL_EXT from config.h.in; provide
++// sane fallbacks so any platform without explicit configure handling builds.
++#ifndef PATH_SEP
++#define PATH_SEP ":"
++#endif
++
++#ifndef DLL_EXT
++#define DLL_EXT "so"
++#endif
++
+ #ifndef _GNU_SOURCE
+ #define _GNU_SOURCE
+ #endif
 diff --git a/src/vhpi/vhpi_user.h b/src/vhpi/vhpi_user.h
-index c03b5fd5c..432395582 100644
+index 1d8d4fdda..c03aa33f1 100644
 --- a/src/vhpi/vhpi_user.h
 +++ b/src/vhpi/vhpi_user.h
 @@ -52,7 +52,7 @@ typedef unsigned __int8 uint8_t;
